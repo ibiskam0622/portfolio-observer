@@ -83,7 +83,8 @@
     </aside>
     <main>
       <div class="source-banner">
-        数据来源：直接调用 <code>http://43.161.221.88:16888/api/...</code>，绕过原网站前端。
+        数据来源：GitHub Actions 每 30 分钟把后端 <code>http://43.161.221.88:16888/api/...</code> 抓成静态快照
+        <code>./data/snapshot.json</code>，前端同 origin 读取避免 mixed-content。
         单位说明：API 返回的金额/百分比均为「亿分比」整数（除以 10⁹ 还原）。
       </div>
       <div v-if="!selectedId" class="empty">← 选择左侧组合查看详情</div>
@@ -160,19 +161,37 @@
     const fmtDate = (ts) => ts ? new Date(ts*1000).toISOString().slice(0,10) : '—';
     const marketName = (m) => ({1:'港股',2:'美股',4:'沪深'}[m] || `M${m}`);
 
-    const api = (path) => {
+    // Data source: prefer static snapshot at ./data/snapshot.json (same HTTPS origin),
+    // fallback to live backend (works from localhost http://).
+    // The snapshot is refreshed every 30 min by a GitHub Action.
+    let SNAPSHOT = null;
+
+    const loadSnapshot = async () => {
+      if (SNAPSHOT) return SNAPSHOT;
+      try {
+        const r = await fetch('./data/snapshot.json?_=' + Date.now());
+        if (!r.ok) throw new Error(`snapshot HTTP ${r.status}`);
+        SNAPSHOT = await r.json();
+        return SNAPSHOT;
+      } catch (e) {
+        console.warn('snapshot load failed:', e.message);
+        SNAPSHOT = null;
+        return null;
+      }
+    };
+
+    const liveApi = (path) => {
       const sep = path.includes('?') ? '&' : '?';
       const url = `${API_BASE}${path}${sep}_=${Date.now()}&token=${TOKEN}`;
       return fetch(url).then(r => r.json());
     };
 
-    // Robust retry wrapper — backend throws 439 → HTTP500 under bursty load.
-    const apiWithRetry = async (path, { retries = 4, baseDelay = 200 } = {}) => {
+    // Robust retry wrapper for live calls — backend throws 439 → HTTP500 under bursty load.
+    const liveApiWithRetry = async (path, { retries = 4, baseDelay = 200 } = {}) => {
       for (let attempt = 0; ; attempt++) {
         try {
-          const j = await api(path);
+          const j = await liveApi(path);
           if (j && j.code === 0) return j;
-          // Backend-side rejection: {"code":1,"msg":"Request failed with status code 439"}
           if (attempt < retries) {
             await new Promise(r => setTimeout(r, baseDelay * Math.pow(2, attempt) + Math.random() * 80));
             continue;
@@ -203,33 +222,46 @@
           listLoading.value = true;
           listError.value = '';
           try {
-            const j = await apiWithRetry('/api/portfolios');
-            if (j.code !== 0) throw new Error(j.msg || 'list error');
-            // Fetch info for each to get net_value + day_ratio.
-            // Sequential with small stagger avoids triggering the backend's 439 burst guard.
-            const ids = Object.keys(j.data);
-            const infos = [];
-            for (const id of ids) {
-              infos.push(await apiWithRetry(`/api/portfolio-info?portfolio_id=${id}`).then(r => r.data).catch(() => null));
-              await new Promise(r => setTimeout(r, 80));
+            const snap = await loadSnapshot();
+            let portfoliosData, infosMap;
+            if (snap) {
+              // Use static snapshot — same-origin, no mixed-content.
+              portfoliosData = snap.portfolios;
+              infosMap = snap.infos;
+            } else {
+              // Fallback to live backend (works from http://localhost dev).
+              const j = await liveApiWithRetry('/api/portfolios');
+              if (j.code !== 0) throw new Error(j.msg || 'list error');
+              portfoliosData = j.data;
+              const ids = Object.keys(j.data);
+              infosMap = {};
+              for (const id of ids) {
+                infosMap[id] = await liveApiWithRetry(`/api/portfolio-info?portfolio_id=${id}`).then(r => r.data).catch(() => null);
+                await new Promise(r => setTimeout(r, 80));
+              }
             }
-            portfolios.value = ids.map((id, i) => ({
-              id: Number(id),
-              name: j.data[id].name,
-              info: infos[i],
-              netValue: infos[i]?.net_value ?? null,
-              dayRatio: (() => {
-                const item = infos[i]?.item?.find(x => x.profit_type === 2);
-                return item ? item.profit_ratio : null;
-              })(),
-              totalRatio: (() => {
-                const item = infos[i]?.item?.find(x => x.profit_type === 0);
-                return item ? item.profit_ratio : null;
-              })(),
-              followers: infos[i]?.follower_count ?? 0,
-              createTime: infos[i]?.create_time ?? null,
-            }));
-            listUpdatedAt.value = new Date().toLocaleTimeString();
+            const ids = Object.keys(portfoliosData);
+            portfolios.value = ids.map(id => {
+              const info = infosMap[id];
+              const day = info?.item?.find(x => x.profit_type === 2);
+              const tot = info?.item?.find(x => x.profit_type === 0);
+              return {
+                id: Number(id),
+                name: portfoliosData[id].name,
+                info,
+                netValue: info?.net_value ?? null,
+                dayRatio: day?.profit_ratio ?? null,
+                totalRatio: tot?.profit_ratio ?? null,
+                followers: info?.follower_count ?? 0,
+                createTime: info?.create_time ?? null,
+              };
+            });
+            if (snap) {
+              const t = new Date(snap.generated_at * 1000).toLocaleTimeString();
+              listUpdatedAt.value = `快照 ${t}`;
+            } else {
+              listUpdatedAt.value = new Date().toLocaleTimeString();
+            }
           } catch (e) {
             listError.value = '列表加载失败：' + e.message;
           } finally {
@@ -249,28 +281,37 @@
           // Wait one more frame so the v-if expanded DOM has the chart containers.
           await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
           try {
-            const infoRes = await apiWithRetry(`/api/portfolio-info?portfolio_id=${id}`);
-            detail.value = infoRes.data;
-            // Attach derived day/total ratios
-            const day = infoRes.data.item?.find(x => x.profit_type === 2);
-            const tot = infoRes.data.item?.find(x => x.profit_type === 0);
+            let infoData, posData, chartItems;
+            if (SNAPSHOT) {
+              // snapshot already loaded — use it
+              infoData = SNAPSHOT.infos[id];
+              posData = SNAPSHOT.positions[id];
+              chartItems = SNAPSHOT.profit_charts?.[id];
+            } else {
+              // fallback to live
+              const infoRes = await liveApiWithRetry(`/api/portfolio-info?portfolio_id=${id}`);
+              infoData = infoRes.data;
+              const posRes = await liveApiWithRetry(`/api/portfolio-position?portfolio_id=${id}`);
+              posData = posRes.data;
+              try {
+                const chartRes = await liveApiWithRetry(`/api/profit-chart?portfolio_id=${id}`);
+                chartItems = chartRes.data?.[0]?.indexItems?.[0]?.item;
+              } catch (_) { chartItems = null; }
+            }
+            detail.value = JSON.parse(JSON.stringify(infoData));
+            const day = infoData.item?.find(x => x.profit_type === 2);
+            const tot = infoData.item?.find(x => x.profit_type === 0);
             detail.value.day_ratio = day?.profit_ratio ?? null;
             detail.value.total_ratio = tot?.profit_ratio ?? null;
-
-            const posRes = await apiWithRetry(`/api/portfolio-position?portfolio_id=${id}`);
-            positions.value = posRes.data;
+            positions.value = posData;
 
             await nextTick();
             renderCharts();
-
-            // profit chart (separate call, non-blocking on errors)
-            apiWithRetry(`/api/profit-chart?portfolio_id=${id}`).then(j => {
-              if (j.code === 0 && j.data?.[0]?.indexItems?.[0]?.item) {
-                drawProfitChart(j.data[0].indexItems[0].item);
-              } else {
-                drawProfitChart(null);
-              }
-            }).catch(()=>{});
+            if (chartItems && chartItems.length) {
+              drawProfitChart(chartItems);
+            } else {
+              drawProfitChart(null);
+            }
           } catch (e) {
             detail.value = { name: '加载失败', advice: e.message };
           }
