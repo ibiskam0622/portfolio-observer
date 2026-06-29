@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>组合观察 · 独立观察站</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%8A%3C/text%3E%3C/svg%3E" />
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2028;
+      --panel-2: #232b36;
+      --border: #2a3340;
+      --text: #e6e9ef;
+      --muted: #8a94a6;
+      --green: #22c55e;
+      --red: #ef4444;
+      --accent: #60a5fa;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; height: 100%; }
+    a { color: var(--accent); text-decoration: none; }
+    .app { display: grid; grid-template-columns: 320px 1fr; height: 100vh; min-height: 100vh; }
+    aside { background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; min-height: 0; }
+    main { overflow-y: auto; padding: 24px; min-height: 0; }
+    header.top { padding: 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; position: sticky; top: 0; background: var(--panel); z-index: 1; }
+    header.top h1 { font-size: 15px; margin: 0; }
+    header.top .meta { color: var(--muted); font-size: 12px; }
+    ul.list { list-style: none; margin: 0; padding: 8px; }
+    ul.list li { padding: 12px; border-radius: 8px; cursor: pointer; transition: background .15s; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: baseline; }
+    ul.list li:hover { background: var(--panel-2); }
+    ul.list li.active { background: var(--panel-2); outline: 1px solid var(--border); }
+    ul.list .name { font-weight: 600; }
+    ul.list .nv { color: var(--muted); font-variant-numeric: tabular-nums; }
+    ul.list .pnl { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; }
+    .pnl.up { color: var(--green); }
+    .pnl.down { color: var(--red); }
+    .empty { color: var(--muted); display: flex; align-items: center; justify-content: center; height: 100%; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .panel h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted); font-weight: 500; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+    .stat { background: var(--panel-2); padding: 12px; border-radius: 8px; }
+    .stat .label { color: var(--muted); font-size: 12px; }
+    .stat .value { font-size: 20px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid var(--border); }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+    tbody tr:hover { background: var(--panel-2); }
+    .chip { display: inline-block; padding: 2px 8px; border-radius: 4px; background: var(--panel-2); font-size: 12px; color: var(--muted); }
+    .advice { white-space: pre-wrap; color: var(--text); line-height: 1.6; background: var(--panel-2); padding: 12px; border-radius: 8px; }
+    #chart { height: 360px; }
+    .error { color: var(--red); }
+    .toolbar { display: flex; gap: 8px; align-items: center; }
+    .btn { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+    .btn:hover { background: #2c3543; }
+    .source-banner { background: rgba(96,165,250,.08); border: 1px solid rgba(96,165,250,.3); color: var(--accent); padding: 8px 12px; border-radius: 6px; font-size: 12px; margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+  <div id="app" class="app">
+    <aside>
+      <header class="top">
+        <div>
+          <h1>📊 组合列表</h1>
+          <div class="meta" v-if="listUpdatedAt">{{ listUpdatedAt }} · {{ portfolios.length }} 个组合</div>
+          <div class="meta" v-else-if="listError" style="color:var(--red)">{{ listError }}</div>
+        </div>
+        <button class="btn" @click="loadList" :disabled="listLoading">{{ listLoading ? '加载中…' : '刷新' }}</button>
+      </header>
+      <ul class="list">
+        <li v-if="listLoading && portfolios.length===0"><div class="empty">加载中…</div></li>
+        <li v-for="p in sortedPortfolios" :key="p.id"
+            :class="{ active: p.id===selectedId }"
+            @click="select(p.id)">
+          <div class="name">{{ p.name }}</div>
+          <div class="pnl" :class="p.dayRatio>=0?'up':'down'">{{ fmtPct(p.dayRatio) }}</div>
+          <div class="nv" style="grid-column:1/-1">净值 {{ fmtNet(p.netValue) }} · 关注 {{ p.followers }}</div>
+        </li>
+      </ul>
+    </aside>
+    <main>
+      <div class="source-banner">
+        数据来源：直接调用 <code>http://43.161.221.88:16888/api/...</code>，绕过原网站前端。
+        单位说明：API 返回的金额/百分比均为「亿分比」整数（除以 10⁹ 还原）。
+      </div>
+      <div v-if="!selectedId" class="empty">← 选择左侧组合查看详情</div>
+      <template v-else>
+        <div class="panel">
+          <h2>{{ detail?.name || '加载中…' }} <span class="chip">PFL0{{ selectedId }}</span> <span class="chip" v-if="detail">{{ detail.follower_count }} 人关注</span></h2>
+          <div class="stat-grid">
+            <div class="stat"><div class="label">净值</div><div class="value">{{ fmtNet(detail?.net_value) }}</div></div>
+            <div class="stat"><div class="label">日收益</div><div class="value" :class="(detail?.day_ratio??0)>=0?'up':'down'">{{ fmtPct(detail?.day_ratio) }}</div></div>
+            <div class="stat"><div class="label">累计收益</div><div class="value" :class="(detail?.total_ratio??0)>=0?'up':'down'">{{ fmtPct(detail?.total_ratio) }}</div></div>
+            <div class="stat"><div class="label">建仓时间</div><div class="value">{{ fmtDate(detail?.create_time) }}</div></div>
+          </div>
+        </div>
+
+        <div class="panel" v-if="detail?.advice">
+          <h2>组合说明</h2>
+          <div class="advice">{{ detail.advice }}</div>
+        </div>
+
+        <div class="panel">
+          <h2>收益曲线</h2>
+          <div id="chart" style="width:100%;height:360px"></div>
+        </div>
+
+        <div class="panel">
+          <h2>市场分布</h2>
+          <div id="chart-market" style="width:100%;height:220px"></div>
+        </div>
+
+        <div class="panel">
+          <h2>行业分布</h2>
+          <div id="chart-industry" style="width:100%;height:220px"></div>
+        </div>
+
+        <div class="panel">
+          <h2>持仓明细</h2>
+          <div v-if="!positions" class="empty">加载中…</div>
+          <table v-else-if="positions.record_items?.length">
+            <thead>
+              <tr>
+                <th>代码</th><th>名称</th><th>市场</th>
+                <th>仓位%</th><th>成本价</th><th>现价</th><th>盈亏%</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in positions.record_items" :key="r.stock_id">
+                <td>{{ r.stock_code }}</td>
+                <td>{{ r.stock_name }}</td>
+                <td>{{ marketName(r.market) }}</td>
+                <td>{{ fmtPct(r.total_ratio) }}</td>
+                <td>{{ fmtPrice(r.cost_price) }}</td>
+                <td>{{ fmtPrice(r.current_price) }}</td>
+                <td :class="r.profit_and_loss_ratio>=0?'pnl up':'pnl down'">{{ fmtPct(r.profit_and_loss_ratio) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="empty">暂无持仓</div>
+        </div>
+      </template>
+    </main>
+  </div>
+
+  <script>
+    const { createApp, reactive, ref, computed, onMounted, watch, nextTick } = Vue;
+
+    const API_BASE = 'http://43.161.221.88:16888';
+    const TOKEN = 'eWa4S7L51xQJ0DAVwP68XGN2BM9HnFrU';
+    const DIV = 1e9;
+
+    // Convert "亿分比" ints to human values
+    const fmtPct = (v) => v == null ? '—' : `${(v/DIV*100).toFixed(2)}%`;
+    const fmtNet = (v) => v == null ? '—' : (v/DIV).toFixed(4);
+    const fmtPrice = (v) => v == null ? '—' : (v/DIV).toFixed(4);
+    const fmtDate = (ts) => ts ? new Date(ts*1000).toISOString().slice(0,10) : '—';
+    const marketName = (m) => ({1:'港股',2:'美股',4:'沪深'}[m] || `M${m}`);
+
+    const api = (path) => {
+      const sep = path.includes('?') ? '&' : '?';
+      const url = `${API_BASE}${path}${sep}_=${Date.now()}&token=${TOKEN}`;
+      return fetch(url).then(r => r.json());
+    };
+
+    // Robust retry wrapper — backend throws 439 → HTTP500 under bursty load.
+    const apiWithRetry = async (path, { retries = 4, baseDelay = 200 } = {}) => {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const j = await api(path);
+          if (j && j.code === 0) return j;
+          // Backend-side rejection: {"code":1,"msg":"Request failed with status code 439"}
+          if (attempt < retries) {
+            await new Promise(r => setTimeout(r, baseDelay * Math.pow(2, attempt) + Math.random() * 80));
+            continue;
+          }
+          return j;
+        } catch (e) {
+          if (attempt < retries) {
+            await new Promise(r => setTimeout(r, baseDelay * Math.pow(2, attempt) + Math.random() * 80));
+            continue;
+          }
+          throw e;
+        }
+      }
+    };
+
+    createApp({
+      setup() {
+        const portfolios = ref([]);
+        const listLoading = ref(false);
+        const listError = ref('');
+        const listUpdatedAt = ref('');
+        const selectedId = ref(null);
+        const detail = ref(null);
+        const positions = ref(null);
+        let chartProfit, chartMarket, chartIndustry;
+
+        async function loadList() {
+          listLoading.value = true;
+          listError.value = '';
+          try {
+            const j = await apiWithRetry('/api/portfolios');
+            if (j.code !== 0) throw new Error(j.msg || 'list error');
+            // Fetch info for each to get net_value + day_ratio.
+            // Sequential with small stagger avoids triggering the backend's 439 burst guard.
+            const ids = Object.keys(j.data);
+            const infos = [];
+            for (const id of ids) {
+              infos.push(await apiWithRetry(`/api/portfolio-info?portfolio_id=${id}`).then(r => r.data).catch(() => null));
+              await new Promise(r => setTimeout(r, 80));
+            }
+            portfolios.value = ids.map((id, i) => ({
+              id: Number(id),
+              name: j.data[id].name,
+              info: infos[i],
+              netValue: infos[i]?.net_value ?? null,
+              dayRatio: (() => {
+                const item = infos[i]?.item?.find(x => x.profit_type === 2);
+                return item ? item.profit_ratio : null;
+              })(),
+              totalRatio: (() => {
+                const item = infos[i]?.item?.find(x => x.profit_type === 0);
+                return item ? item.profit_ratio : null;
+              })(),
+              followers: infos[i]?.follower_count ?? 0,
+              createTime: infos[i]?.create_time ?? null,
+            }));
+            listUpdatedAt.value = new Date().toLocaleTimeString();
+          } catch (e) {
+            listError.value = '列表加载失败：' + e.message;
+          } finally {
+            listLoading.value = false;
+          }
+        }
+
+        const sortedPortfolios = computed(() => {
+          // sort by day ratio desc; nulls last
+          return [...portfolios.value].sort((a, b) => (b.dayRatio ?? -Infinity) - (a.dayRatio ?? -Infinity));
+        });
+
+        async function select(id) {
+          selectedId.value = id;
+          detail.value = null; positions.value = null;
+          await nextTick();
+          // Wait one more frame so the v-if expanded DOM has the chart containers.
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          try {
+            const infoRes = await apiWithRetry(`/api/portfolio-info?portfolio_id=${id}`);
+            detail.value = infoRes.data;
+            // Attach derived day/total ratios
+            const day = infoRes.data.item?.find(x => x.profit_type === 2);
+            const tot = infoRes.data.item?.find(x => x.profit_type === 0);
+            detail.value.day_ratio = day?.profit_ratio ?? null;
+            detail.value.total_ratio = tot?.profit_ratio ?? null;
+
+            const posRes = await apiWithRetry(`/api/portfolio-position?portfolio_id=${id}`);
+            positions.value = posRes.data;
+
+            await nextTick();
+            renderCharts();
+
+            // profit chart (separate call, non-blocking on errors)
+            apiWithRetry(`/api/profit-chart?portfolio_id=${id}`).then(j => {
+              if (j.code === 0 && j.data?.[0]?.indexItems?.[0]?.item) {
+                drawProfitChart(j.data[0].indexItems[0].item);
+              } else {
+                drawProfitChart(null);
+              }
+            }).catch(()=>{});
+          } catch (e) {
+            detail.value = { name: '加载失败', advice: e.message };
+          }
+        }
+
+        function renderCharts() {
+          // destroy if exists
+          [chartProfit, chartMarket, chartIndustry].forEach(c => c && c.dispose());
+          chartProfit = echarts.init(document.getElementById('chart'), 'dark');
+          chartMarket = echarts.init(document.getElementById('chart-market'), 'dark');
+          chartIndustry = echarts.init(document.getElementById('chart-industry'), 'dark');
+          drawMarketChart();
+          drawIndustryChart();
+          drawProfitChart(null); // placeholder
+          // Force layout pass so widths resolve
+          requestAnimationFrame(() => {
+            window.dispatchEvent(new Event('resize'));
+            [chartProfit, chartMarket, chartIndustry].forEach(c => c && c.resize());
+          });
+        }
+
+        function drawMarketChart() {
+          chartMarket.setOption({
+            tooltip: { trigger: 'item', formatter: '{b}: {c}%' },
+            series: [{
+              type: 'pie', radius: ['45%','70%'],
+              data: positions.value.market_items.map(m => ({
+                name: m.tab_name, value: (m.ratio/DIV*100).toFixed(2)
+              }))
+            }]
+          }, true);
+        }
+        function drawIndustryChart() {
+          chartIndustry.setOption({
+            tooltip: { trigger: 'item', formatter: '{b}: {c}%' },
+            series: [{
+              type: 'pie', radius: ['45%','70%'],
+              data: positions.value.industry_items.map(m => ({
+                name: m.tab_name, value: (m.ratio/DIV*100).toFixed(2)
+              }))
+            }]
+          }, true);
+        }
+        function drawProfitChart(items) {
+          if (!items || !items.length) {
+            chartProfit.clear();
+            chartProfit.setOption({
+              title: { text: '暂无收益曲线数据', left: 'center', top: 'middle', textStyle: { color: '#8a94a6' } }
+            }, true);
+            return;
+          }
+          // items: [{datetime: '1704...', profitRatio: '...', netValue?: '...'}, ...]
+          // API returns them newest-first; flip to ascending for the x-axis.
+          const rows = items.slice().reverse();
+          chartProfit.setOption({
+            tooltip: { trigger: 'axis' },
+            grid: { left: 60, right: 20, top: 20, bottom: 40 },
+            xAxis: {
+              type: 'category',
+              data: rows.map(d => new Date(Number(d.datetime) * 1000).toISOString().slice(0, 10)),
+              axisLabel: { rotate: 30, fontSize: 11 }
+            },
+            yAxis: { type: 'value', axisLabel: { formatter: v => (v / 1e9 * 100).toFixed(1) + '%' } },
+            series: [{
+              type: 'line', smooth: true, showSymbol: false, areaStyle: { opacity: .15 },
+              data: rows.map(d => Number(d.profitRatio))
+            }]
+          }, true);
+        }
+
+        onMounted(() => {
+          loadList();
+          window.addEventListener('resize', () => {
+            [chartProfit, chartMarket, chartIndustry].forEach(c => c && c.resize());
+          });
+        });
+
+        return {
+          portfolios, sortedPortfolios, listLoading, listError, listUpdatedAt, loadList,
+          selectedId, select, detail, positions,
+          fmtPct, fmtNet, fmtPrice, fmtDate, marketName,
+        };
+      }
+    }).mount('#app');
+  </script>
+</body>
+</html>
